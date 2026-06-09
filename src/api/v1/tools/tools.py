@@ -1,49 +1,41 @@
 from langchain_core.documents import Document
-from typing import TypedDict, List
+from typing import TypedDict, List, Dict, Any
+from src.core.db import vector_search_chunks
 
 class RAGState(TypedDict):
     query: str
-    retrieved_docs: list
-    reranked_docs: list
-    response: dict
+    chat_history: List[str]
     route: str
+    # Vector Search elements
+    retrieved_docs: List[Any]
+    reranked_docs: List[Any]
+    # SQL elements
     generated_sql: str
     sql_result: str
-    chat_history: list
-    # 🔥 DEBUG FIELDS (ADD ONLY THESE)
+    # Final Output
+    response: Dict[str, Any]
     debug_router_reason: str
 
+
 def vector_search_node(state: RAGState) -> RAGState:
-    try:
-        query = state["query"]
+    print(f"[vector_search_node] Running vector search for query: {state['query']}")
+    rows = vector_search_chunks(state["query"], k=20)
+    print (f"[vector_search_node] Retrieved {len(rows)} rows from PGVector")    
+    # for row in rows:
+    #     print(f"Row content: {row['content']}")
+    
+    docs = [
+        Document(
+            page_content=row["content"],
+            metadata={
+                **row["metadata"],
+                "chunk_type": row["chunk_type"],
+                "page_number": row["page_number"],
+                "section": row["section"],
+                "source_file": row["source_file"],
+            },
+        )
+        for row in rows
+    ]
 
-        print("\n🧠 VECTOR SEARCH NODE (STUB MODE)")
-        print("Query:", query)
-        print("STATUS: NOT IMPLEMENTED YET")
-
-        # placeholder yet to do
-        docs = [
-            Document(
-                page_content="Vector search is not implemented yet. This is a placeholder response.",
-                metadata={
-                    "status": "stub",
-                    "note": "vector_search_node not implemented"
-                }
-            )
-        ]
-
-        return {
-            **state,
-            "retrieved_docs": docs
-        }
-
-    except Exception as e:
-        import traceback
-        print("\n❌ VECTOR NODE ERROR")
-        traceback.print_exc()
-
-        return {
-            **state,
-            "retrieved_docs": [],
-            "error": str(e)
-        }
+    return {**state, "retrieved_docs": docs}

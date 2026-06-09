@@ -3,7 +3,7 @@
 import requests
 import streamlit as st
 
-st.title("Knowledge Base Upload")
+st.title("Credit Card Knowledge Base Upload")
 
 uploaded_file = st.file_uploader(
     "Upload PDF",

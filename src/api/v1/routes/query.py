@@ -1,7 +1,8 @@
-
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from src.api.v1.services.query_service import query_documents
+from requests import request
+from src.api.v1.services.query_service import query_documents,query_documents_stream
+from fastapi.responses import StreamingResponse
 
 router = APIRouter()
 
@@ -14,60 +15,28 @@ class QueryRequest(BaseModel):
 @router.post("/query")
 def query(req: QueryRequest):
     try:
-        return query_documents(req.query, req.session_id)
+        result = query_documents(req.query, req.session_id)
+        return result
+
     except Exception as e:
-        print("[API ERROR]", e)
-        return {
-            "answer": "Internal server error",
-            "route": "error"
-        }
+        # log if needed
+        raise HTTPException(
+            status_code=500,
+            detail=f"Query pipeline failed: {str(e)}"
+        )
 
 
-# from fastapi import APIRouter, HTTPException
-# from pydantic import BaseModel
+@router.post("/query/stream")
+async def query(req: QueryRequest):
+    print ("Calling query_documents_stream with query:", req.query)
+    try:
+        generator = await query_documents_stream(req.query, req.session_id)
+        print(f"Generator created for query--ROUTER: {req.query}")
+        return StreamingResponse(generator, media_type="text/event-stream")
 
-# from src.api.v1.services.query_service import query_documents
-
-# router = APIRouter()
-
-
-# class QueryRequest(BaseModel):
-#     query: str
-#     session_id: str
-
-
-# @router.post("/query")
-# def query(req: QueryRequest):
-#     try:
-#         result = query_documents(req.query, req.session_id)
-#         return result
-
-#     except Exception as e:
-#         # log if needed
-#         raise HTTPException(
-#             status_code=500,
-#             detail=f"Query pipeline failed: {str(e)}"
-#         )
-
-
-# from fastapi import APIRouter, HTTPException
-
-# from src.api.v1.services.query_service import query_documents
-# from src.api.v1.schema.query_schema import QueryRequest, QueryResponse
-
-# router = APIRouter()
-
-# @router.post("/query", response_model=QueryResponse)
-# def query_endpoint(request: QueryRequest):
-#     try:
-#         response = query_documents(
-#             query=request.query,
-#             session_id=request.session_id
-#         )
-#         return response
-
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=500,
-#             detail=str(e)
-#         )
+    except Exception as e:
+        # log if needed
+        raise HTTPException(
+            status_code=500,
+            detail=f"Query pipeline failed: {str(e)}"
+        )
