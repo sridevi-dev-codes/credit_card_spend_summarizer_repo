@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Literal
 import cohere
@@ -17,31 +18,15 @@ load_dotenv()
 # LLM
 # ─────────────────────────────────────────────
 def _get_llm() -> ChatOpenAI:
-    return ChatOpenAI(
+    return ChatOpenAI( 
         model=os.getenv("OPENAI_CHAT_MODEL"),
         api_key=os.getenv("OPENAI_API_KEY")
     )
 
-# ─────────────────────────────────────────────
-# ROUTER SCHEMA
-# ─────────────────────────────────────────────
-# class _RouteDecision(BaseModel):
-#     route: Literal[
-#         "transaction",
-#         "document",
-#         "greeting",
-#         "unsupported"
-#     ]
-#     reason: str
 class _RouteDecision(BaseModel):
-    route: Literal[
-        "transaction",
-        "document",
-        "greeting",
-        "identity",
-        "unsupported"
-    ]
+    route: Literal["transaction", "document", "Hybrid_SQL_Document", "general"]
     reason: str
+
 
 # ─────────────────────────────────────────────
 # ROUTER NODE
@@ -50,38 +35,38 @@ def router_node(state: RAGState) -> RAGState:
     llm = _get_llm()
     structured_llm = llm.with_structured_output(_RouteDecision)
 
-    prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            """
-You are a query router for a credit card intelligence system.
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
+You are an expert query router for a credit card intelligence system. Your job is to classify the user's intent into exactly ONE route.
+
+--- CRITICAL ROUTING PRIORITY RULE ---
+Always check for 'Hybrid_SQL_Document' FIRST. If a query requires searching both concrete database records (specific account IDs, transaction codes, balances, or card types) AND matching them against fine-print rules or policies, you MUST choose 'Hybrid_SQL_Document'. Do NOT route to 'transaction' or 'document' if elements of both are present.
 
 Routes:
 
-1. transaction:
-- credit card spending, billing, statements, rewards, cashback, EMI, fees,
-  fraud, limits, card usage, monthly summary
-- structured DB: billing_statements, card_transactions, credit_cards, customers, reward_transactions
+1. Hybrid_SQL_Document:
+- Select this when an answer requires BOTH customer-specific account data AND general company policy guidelines to answer.
+- Indicators: Mention of a specific card identifier (e.g., "CC-110098") or any credit card number, transaction details, or spend histories combined with policy words like "eligible", "waiver", "rules", "perks", or "benefits".
+- Example: "is my card CC-110098 eligible for annual fee waiver" -> (Needs to check if CC-110098 has met spend thresholds via SQL, and check waiver criteria via Policy Document).
 
-2. document:
-- policies, benefits, forex markup, FAQs, rules, regulations, explanations
+2. transaction:
+- Purely structured database inquiries. Spending lookups, billing amounts, statement data, reward balances, or direct transaction histories.
+- Does NOT require reading unstructured rulebooks or fine-print policies.
+- Example: "Show me my transactions for last month" or "What is the balance on card CC-110098?"
 
-3. greeting
-- hi, hello, hey, good morning, good evening ,bye, goodbye, see you, thank you,
-thanks, ok, cool
+3. general:
+- greetings, identity questions, memory questions, or anything not requiring SQL or documents
 
-4. identity
-- who are you, what can you do, what is this application, tell me about yourself,
-help, capabilities
-
-5. unsupported
-- anything outside credit card domain
-
-Return ONLY route + reason.
-"""
-        ),
-        ("human", "Chat history:\n{history}\n\nQuery: {query}")
-    ])
+STRICT RULE:
+If unsure → choose general
+""",
+            ),
+            ("human", "Chat history:\n{history}\n\nQuery: {query}"),
+        ]
+    )
 
     chain = prompt | structured_llm
 
@@ -89,22 +74,13 @@ Return ONLY route + reason.
         "query": state["query"],
         "history": "\n".join(state.get("chat_history", []))
     })
-    # 🔥 DEBUG PRINTS
-    print("\n🧭 ROUTER DEBUG")
-    print("Route:", decision.route)
-    print("Reason:", decision.reason)
+
+    print("\n🧭 ROUTER:", decision.route, decision.reason)
 
     return {
         **state,
-        "route": decision.route,
-        "debug_router_reason": decision.reason
+        "route": decision.route
     }
-
-    # return {
-    #     **state,
-    #     "route": decision.route
-    # }
-
 # ─────────────────────────────────────────────
 # SAFE SQL EXECUTION (AUTO RETRY)
 # ─────────────────────────────────────────────
@@ -116,6 +92,7 @@ def safe_sql_execute(db, sql, retries=2):
             if i == retries - 1:
                 return f"SQL execution error after retries: {e}"
             sql = sql + " LIMIT 10"
+
 
 # ─────────────────────────────────────────────
 # NL2SQL NODE (TRANSACTION PATH)
@@ -230,7 +207,7 @@ def expand_queries(query: str, llm) -> list:
 def rerank_node(state: RAGState) -> RAGState:
     co = cohere.ClientV2(api_key=os.getenv("COHERE_API_KEY"))
     docs = state["retrieved_docs"]
-
+    
     rerank_response = co.rerank(
         model="rerank-english-v3.0",
         query=state["query"],
@@ -239,6 +216,8 @@ def rerank_node(state: RAGState) -> RAGState:
     )
 
     reranked_docs = [docs[r.index] for r in rerank_response.results]
+    print('**********************************')
+    print(f'After reranking:{reranked_docs}')
 
     return {**state, "reranked_docs": reranked_docs}
 
@@ -280,98 +259,256 @@ If multiple versions exist:
         **state,
         "response": result.model_dump()
     }
+# ─────────────────────────────────────────────
+# GENERAL NODE ( HANDLES EVERYTHING ELSE)
+# ─────────────────────────────────────────────
+def general_node(state: RAGState) -> RAGState:
+    llm = _get_llm()
 
-# ─────────────────────────────────────────────
-# GREETING NODE
-# ─────────────────────────────────────────────
-def greeting_node(state: RAGState) -> RAGState:
-    q = state["query"].lower()
-    if any(x in q for x in ["bye", "goodbye", "see you"]):
-        msg = "Goodbye 👋 Have a great day."
-    elif any(x in q for x in ["thanks", "thank you"]):
-        msg = "You're welcome 😊"
-    else:
-        msg = (
-            "Hello 👋 I can help with credit card transactions, "
-            "spending summaries, rewards, cashback, billing statements, "
-            "and card policy questions."
-        )
+    history = "\n".join(state.get("chat_history", []))
+
+    prompt = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        """
+You are a friendly Credit Card Assistant.
+
+You MUST:
+Handle greetings naturally
+Handle small talk naturally
+Answer identity questions
+Use chat history for memory
+
+Examples:
+"hi" → greet normally
+"how are you" → respond naturally
+"thank you" → respond politely
+
+ONLY refuse when:
+User asks something completely unrelated
+AN
+D it is not casual conversation/small talk
+
+For unrelated topics, say:
+"I can only assist with credit card related queries."
+
+Chat History:
+{history}
+"""
+    ),
+    ("human", "{query}")
+])
+
+    answer = (prompt | llm).invoke({
+        "query": state["query"],
+        "history": history
+    })
+
     return {
         **state,
         "response": {
-            "answer": msg,
+            "answer": answer.content,
             "policy_citations": "N/A",
             "document_name": "N/A",
             "page_no": "N/A"
         }
     }
-#___________________________________________
-#IDENTITY NODE
-#___________________________________________
-def identity_node(state: RAGState) -> RAGState:
-    return {
-        **state,
-        "response": {
-            "answer": (
-                "I am a Credit Card Spend Assistant. "
-                "I can help you analyse card transactions, spending patterns, "
-                "billing statements, rewards, cashback, and answer questions "
-                "about credit card policies and benefits."
+	
+# ─────────────────────────────────────────────
+# HYBRID ORCHESTRATION NODE
+# ─────────────────────────────────────────────
+def hybrid_node(state: RAGState) -> RAGState:
+    """Executes BOTH SQL data extraction and vector retrieval concurrently or sequentially."""
+    print("\n🔀 RUNNING HYBRID NODE")
+
+    # --- 1. Execute SQL Extraction Part ---
+    llm = _get_llm()
+    db = get_sql_database()
+    schema_info = db.get_table_info()
+
+    sql_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "You are a PostgreSQL expert for a credit card analytics system. Return ONLY valid SELECT code.\nSchema:\n{schema}",
             ),
-            "policy_citations": "N/A",
-            "document_name": "N/A",
-            "page_no": "N/A"
+            ("human", "Chat history:\n{history}\n\nQuestion: {question}"),
+        ]
+    )
+
+    sql_chain = sql_prompt | llm
+    raw_sql = sql_chain.invoke(
+        {
+            "schema": schema_info,
+            "question": state["query"],
+            "history": "\n".join(state.get("chat_history", [])),
         }
-    }
-# ─────────────────────────────────────────────
-# UNSUPPORTED NODE
-# ─────────────────────────────────────────────
-def unsupported_node(state: RAGState) -> RAGState:
+    )
+
+    generated_sql = raw_sql.content.strip().strip("```").strip()
+    if generated_sql.lower().startswith("sql"):
+        generated_sql = generated_sql[3:].strip()
+
+    print(f"[Hybrid] Executing Generated SQL: {generated_sql}")
+    sql_result = safe_sql_execute(db, generated_sql)
+
+    # --- 2. Execute Document Vector Search Part ---
+    print(f"[Hybrid] Querying PGVector for context...")
+    # Directly pull vector search logic
+    from src.api.v1.tools.tools import vector_search_chunks
+    from langchain_core.documents import Document
+
+    rows = vector_search_chunks(
+        state["query"], k=15
+    )  # Slightly lower k since it's hybrid
+    docs = [
+        Document(
+            page_content=row["content"],
+            metadata={
+                **row["metadata"],
+                "chunk_type": row["chunk_type"],
+                "page_number": row["page_number"],
+                "section": row["section"],
+                "source_file": row["source_file"],
+            },
+        )
+        for row in rows
+    ]
+
+    # Return everything collected into the state pipeline
     return {
         **state,
-        "response": {
-            "answer": "I can only assist with credit card related queries.",
-            "policy_citations": "N/A",
-            "document_name": "N/A",
-            "page_no": "N/A"
-        }
+        "generated_sql": generated_sql,
+        "sql_result": str(sql_result),
+        "retrieved_docs": docs,
     }
 
+
+# ─────────────────────────────────────────────
+# HYBRID GENERATOR NODE (COMBINER)
+# ─────────────────────────────────────────────
+def generate_hybrid_answer_node(state: RAGState) -> RAGState:
+    """Synthesizes structured transaction results and policy rules into one cohesive AIResponse."""
+    llm = _get_llm()
+    structured_llm = llm.with_structured_output(AIResponse)
+
+    # Setup document context from the Reranker step
+    context = "\n\n".join(
+        [
+            f"[Source: {doc.metadata.get('source_file','unknown')} | Page: {doc.metadata.get('page_number','?')}]"
+            f"\n{doc.page_content}"
+            for doc in state["reranked_docs"]
+        ]
+    )
+
+    hybrid_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
+You are a senior credit card optimization analyst. 
+
+Your job is to answer the user's inquiry by evaluating their real-time transaction history against company policy documentation.
+
+Guidelines:
+1. Examine the SQL Database Output to check user details (e.g., specific transactions, spending milestones, fee charges).
+2. Cross-reference this with the Provided Policy Context (e.g., fee waiver rules, timeline limits).
+3. Synthesize both to provide a definite conclusion (e.g., "Yes, you hit the $5,000 threshold, so you qualify" or "No, you have not spent enough yet").
+""",
+            ),
+            (
+                "human",
+                """
+User Question: {query}
+
+--- TRANSACTION DATA (SQL RESULT) ---
+SQL Query Executed: {sql}
+Data Returned: {sql_result}
+
+--- POLICY RULES CONTEXT ---
+{context}
+""",
+            ),
+        ]
+    )
+
+    chain = hybrid_prompt | structured_llm
+    result = chain.invoke(
+        {
+            "query": state["query"],
+            "sql": state["generated_sql"],
+            "sql_result": state["sql_result"],
+            "context": context,
+        }
+    )
+
+    # Inject metadata back into the final response model payload
+    response = result.model_dump()
+    response["sql_query_executed"] = state["generated_sql"]
+
+    return {**state, "response": response}	
+	
 # ─────────────────────────────────────────────
 # GRAPH BUILDER
 # ─────────────────────────────────────────────
+
+
 def build_rag_graph():
     graph = StateGraph(RAGState)
 
+    # 1. Register ALL nodes
     graph.add_node("router", router_node)
     graph.add_node("nl2sql", nl2sql_node)
     graph.add_node("vector_search", vector_search_node)
     graph.add_node("rerank", rerank_node)
     graph.add_node("generate_answer", generate_answer_node)
-    graph.add_node("greeting", greeting_node)
-    graph.add_node("identity", identity_node)
-    graph.add_node("unsupported", unsupported_node)
+
+    # New Hybrid Nodes
+    graph.add_node("hybrid_orchestrator", hybrid_node)
+    graph.add_node("generate_hybrid_answer", generate_hybrid_answer_node)
+
+    graph.add_node("general", general_node)
 
     graph.set_entry_point("router")
 
+    # 2. Update Conditional Router Mapping
     graph.add_conditional_edges(
         "router",
         lambda state: state["route"],
         {
             "transaction": "nl2sql",
             "document": "vector_search",
-            "greeting": "greeting",
-            "identity": "identity",
-            "unsupported": "unsupported"
-        }
+            "Hybrid_SQL_Document": "hybrid_orchestrator",  # Map to the new hybrid flow
+           "general" : "general"
+        },
     )
 
+    # 3. Handle Edge Handshakes
     graph.add_edge("nl2sql", END)
-    graph.add_edge("vector_search", END)
 
-    # graph.add_edge("vector_search", "rerank")
-    # graph.add_edge("rerank", "generate_answer")
-    # graph.add_edge("generate_answer", END)
+    # Pure Unstructured Path
+    graph.add_edge("vector_search", "rerank")
+
+    # Hybrid Path (Passes documents to Reranker seamlessly)
+    graph.add_edge("hybrid_orchestrator", "rerank")
+
+    # Conditional Split or Direct Edge after Rerank
+    # Since both paths use rerank, we check State Route to determine final generation node
+    graph.add_conditional_edges(
+        "rerank",
+        lambda state: state["route"],
+        {
+            "document": "generate_answer",
+            "Hybrid_SQL_Document": "generate_hybrid_answer",
+        },
+    )
+
+    graph.add_edge("generate_answer", END)
+    graph.add_edge("generate_hybrid_answer", END)
+    graph.add_edge("general", END)
+    # graph_image = graph.get_graph().draw_mermaid_png()
+    # with open("src/agents.png", "wb") as f:
+    #     f.write(graph_image)
 
     return graph.compile()
 
@@ -379,6 +516,7 @@ def build_rag_graph():
 # COMPILED AGENT
 # ─────────────────────────────────────────────
 rag_graph = build_rag_graph()
+
 
 # ─────────────────────────────────────────────
 # PUBLIC ENTRYPOINT
@@ -399,4 +537,46 @@ def run_search_agent(query: str, chat_history: list = None) -> dict:
     }
 
     final_state = rag_graph.invoke(initial_state)
-    return final_state["response"]
+    return final_state  # frontend can access final_state["route"]
+
+
+async def run_search_agent_stream(query: str, chat_history: list = None):
+    print(f"\n🚀 [run_search_agent_stream - agents] Invoked with query: {query}")
+    if chat_history is None:
+        chat_history = []
+
+    initial_state: RAGState = {
+        "query": query,
+        "chat_history": chat_history,
+        "retrieved_docs": [],
+        "reranked_docs": [],
+        "response": {},
+        "route": "",
+        "generated_sql": "",
+        "sql_result": "",
+    }
+
+    async for event in rag_graph.astream_events(initial_state, version="v2"):
+        kind = event["event"]
+
+         # Which graph node produced this event
+        node_name = (
+            event.get("metadata", {})
+            .get("langgraph_node")
+        )
+
+        # Stream only from answer-producing nodes
+        allowed_nodes = {
+            "general",
+            "generate_answer",
+            "generate_hybrid_answer",
+            "nl2sql"
+        }
+
+        if (kind == "on_chat_model_stream" and node_name in allowed_nodes):
+            content = event["data"]["chunk"].content
+            print(f"\n[Stream Event] Node: {node_name} | Content Chunk: {content}")
+            yield f"data: {json.dumps({'type': content})}\n\n"
+    yield "data: [DONE]\n\n"
+
+

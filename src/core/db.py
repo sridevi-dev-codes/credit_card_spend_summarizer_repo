@@ -10,6 +10,8 @@ from psycopg_pool import ConnectionPool
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.utilities import SQLDatabase
 from pgvector.psycopg import register_vector
+# from langchain_postgres import PGVector
+
 
 load_dotenv()
 
@@ -23,7 +25,6 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 _PG_CONNECTION = os.getenv("PG_CONNECTION_STRING", "")
 _PG_DSN = _PG_CONNECTION.replace("postgresql+psycopg://", "postgresql://")
-
 
 # ---------------------------------------------------------------------------
 # OpenAI embeddings — module-level singleton.
@@ -48,6 +49,35 @@ _embeddings = OpenAIEmbeddings(
 )
 
 
+def vector_search_chunks(query: str, k: int = 20) -> list[dict]:
+    query_embedding = _embeddings.embed_query(query)
+    vector_literal = "[" + ",".join(str(v) for v in query_embedding) + "]"
+
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    doc_id,
+                    chunk_type,
+                    element_type,
+                    content,
+                    image_path,
+                    mime_type,
+                    page_number,
+                    section,
+                    source_file,
+                    position,
+                    metadata,
+                    embedding <=> %s::vector AS distance
+                FROM multimodal_chunks
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (vector_literal, vector_literal, k),
+            )
+            return cur.fetchall()
 
 
 def _embed_texts(texts: list[str]) -> list[list[float]]:

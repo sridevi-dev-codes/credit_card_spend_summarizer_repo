@@ -35,7 +35,10 @@ def load_history(session_id: str):
         with psycopg.connect(CONN) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, (session_id,))
-                return cur.fetchall()
+                res = cur.fetchall()
+                
+                # Format history as Q/A for prompts
+                return [f"Q: {q}\nA: {a}" for q, a, _ in res]
 
     except Exception as e:
         print("[chat_history load error]", e)

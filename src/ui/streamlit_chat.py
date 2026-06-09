@@ -1,7 +1,11 @@
+import json
+
 import streamlit as st
 import requests
 
-API_URL = "http://localhost:8000/api/v1/query"
+import uuid
+
+API_URL = "http://localhost:8000/api/v1/query/stream"
 
 st.set_page_config(page_title="Credit Card Assistant", layout="centered")
 
@@ -16,16 +20,7 @@ if "messages" not in st.session_state:
 if "session_id" not in st.session_state:
     st.session_state.session_id = "demo-session"
 
-# ─────────────────────────────────────────────
-# Session input
-# ─────────────────────────────────────────────
-session_id = st.text_input(
-    "Session ID",
-    value=st.session_state.session_id
-)
-
-st.session_state.session_id = session_id
-
+session_id = st.session_state.session_id
 
 # ─────────────────────────────────────────────
 # Display chat history
@@ -34,15 +29,14 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────
 # Chat input
 # ─────────────────────────────────────────────
 query = st.chat_input("Ask something about your credit card...")
 
 if query:
 
-    # 1. Show user message immediately
+    # User message
     st.session_state.messages.append(
         {"role": "user", "content": query}
     )
@@ -50,38 +44,58 @@ if query:
     with st.chat_message("user"):
         st.markdown(query)
 
-    # 2. Call backend
-    with st.spinner("Thinking..."):
+    # Assistant streaming response
+    with st.chat_message("assistant"):
+
+        message_placeholder = st.empty()
+        full_response = ""
+
         try:
-            res = requests.post(
+            response = requests.post(
                 API_URL,
                 json={
                     "query": query,
                     "session_id": session_id
-                }
+                },
+                stream=True
             )
 
-            if res.status_code != 200:
-                raise Exception(res.text)
+            response.raise_for_status()
 
-            data = res.json()
+            for line in response.iter_lines():
 
-            answer = data.get("answer", "No response")
-            route = data.get("route", "unknown")
+                if not line:
+                    continue
+
+                line = line.decode("utf-8")
+
+                if line.startswith("data: "):
+
+                    payload = line[6:]
+
+                    if payload == "[DONE]":
+                        break
+
+                    data = json.loads(payload)
+
+                    token = data.get("type", "")
+
+                    full_response += token
+
+                    message_placeholder.markdown(full_response + "▌")
+
+            message_placeholder.markdown(full_response)
 
         except Exception as e:
-            answer = f"Error: {str(e)}"
-            route = "error"
-
-    # 3. Show assistant message
-    assistant_message = f"{answer}\n\n🧭 Route: `{route}`"
+            full_response = f"Error: {e}"
+            message_placeholder.markdown(full_response)
 
     st.session_state.messages.append(
-        {"role": "assistant", "content": assistant_message}
+        {
+            "role": "assistant",
+            "content": full_response
+        }
     )
-
-    with st.chat_message("assistant"):
-        st.markdown(assistant_message)
 
 
 # ─────────────────────────────────────────────
@@ -90,7 +104,7 @@ if query:
 with st.sidebar:
     st.header("🧠 Session Controls")
 
-    st.write(f"Current Session: `{session_id}`")
+    st.write(f"Current Session: {session_id}")
 
     if st.button("🧹 Clear Chat UI"):
         st.session_state.messages = []
