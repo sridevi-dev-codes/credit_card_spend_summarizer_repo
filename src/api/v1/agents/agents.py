@@ -42,6 +42,33 @@ def router_node(state: RAGState) -> RAGState:
                 """
 You are an expert query router for a credit card intelligence system. Your job is to classify the user's intent into exactly ONE route.
 
+IMPORTANT CONTEXT RULE:
+If the current query omits information such as card number, account ID, card type, or customer identifier, infer the missing information from the most recent conversation history.
+
+Pronouns and references such as:
+- it
+- this card
+- my card
+- that account
+- the above card
+
+should refer to the latest card/account identifier mentioned in previous messages.
+
+Example:
+
+History:
+User: What is the balance on card CC-110098?
+Assistant: ₹12,000
+
+Current query:
+Is it eligible for annual fee waiver?
+
+Interpretation:
+"it" = card CC-110098
+
+Since eligibility requires both spend data and policy rules,
+route = Hybrid_SQL_Document.
+
 --- CRITICAL ROUTING PRIORITY RULE ---
 Always check for 'Hybrid_SQL_Document' FIRST. If a query requires searching both concrete database records (specific account IDs, transaction codes, balances, or card types) AND matching them against fine-print rules or policies, you MUST choose 'Hybrid_SQL_Document'. Do NOT route to 'transaction' or 'document' if elements of both are present.
 
@@ -156,7 +183,7 @@ Schema:
             """
 You are a credit card data analyst.
 
-Use SQL results to answer clearly.
+Use SQL results to answer clearly. But dont mention any database jargons. Translate SQL output into natural language insights.
 
 Rules:
 - concise answer
@@ -286,11 +313,10 @@ Examples:
 
 ONLY refuse when:
 User asks something completely unrelated
-AN
-D it is not casual conversation/small talk
+AND it is not casual conversation/small talk
 
 For unrelated topics, say:
-"I can only assist with credit card related queries."
+"Sorry.. I can only assist with credit card related queries."
 
 Chat History:
 {history}
@@ -506,11 +532,14 @@ def build_rag_graph():
     graph.add_edge("generate_answer", END)
     graph.add_edge("generate_hybrid_answer", END)
     graph.add_edge("general", END)
-    # graph_image = graph.get_graph().draw_mermaid_png()
-    # with open("src/agents.png", "wb") as f:
-    #     f.write(graph_image)
 
-    return graph.compile()
+    graph = graph.compile()
+
+    graph_image = graph.get_graph().draw_mermaid_png()
+    with open("src/agents.png", "wb") as f:
+        f.write(graph_image)
+
+    return graph
 
 # ─────────────────────────────────────────────
 # COMPILED AGENT

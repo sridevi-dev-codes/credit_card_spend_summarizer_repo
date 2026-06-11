@@ -1,11 +1,9 @@
-import json
-
 import streamlit as st
 import requests
 
 import uuid
 
-API_URL = "http://localhost:8000/api/v1/query/stream"
+API_URL = "http://localhost:8000/api/v1/query"
 
 st.set_page_config(page_title="Credit Card Assistant", layout="centered")
 
@@ -36,7 +34,7 @@ query = st.chat_input("Ask something about your credit card...")
 
 if query:
 
-    # User message
+    # 1. Show user message immediately
     st.session_state.messages.append(
         {"role": "user", "content": query}
     )
@@ -44,58 +42,57 @@ if query:
     with st.chat_message("user"):
         st.markdown(query)
 
-    # Assistant streaming response
-    with st.chat_message("assistant"):
-
-        message_placeholder = st.empty()
-        full_response = ""
-
+    # 2. Call backend
+    with st.spinner("Thinking..."):
         try:
-            response = requests.post(
+            res = requests.post(
                 API_URL,
                 json={
                     "query": query,
                     "session_id": session_id
-                },
-                stream=True
+                }
             )
 
-            response.raise_for_status()
+            data = res.json()
 
-            for line in response.iter_lines():
+            # ----------------------------
+            # CASE 1: SUCCESS (200)
+            # ----------------------------
+            if res.status_code == 200:
+                answer = data.get("response", {}).get("answer", "")
+                route = data.get("route", "unknown")
 
-                if not line:
-                    continue
+            # ----------------------------
+            # CASE 2: GUARDRAIL / CLIENT ERROR (400)
+            # ----------------------------
+            elif res.status_code == 400:
+                answer = data.get("detail", {}).get("message", "Blocked by guardrails")
+                route = "guardrail"
 
-                line = line.decode("utf-8")
-
-                if line.startswith("data: "):
-
-                    payload = line[6:]
-
-                    if payload == "[DONE]":
-                        break
-
-                    data = json.loads(payload)
-
-                    token = data.get("type", "")
-
-                    full_response += token
-
-                    message_placeholder.markdown(full_response + "▌")
-
-            message_placeholder.markdown(full_response)
+            # ----------------------------
+            # CASE 3: SERVER ERROR (500)
+            # ----------------------------
+            else:
+                answer = data.get("detail", "Something went wrong")
+                route = "error"
 
         except Exception as e:
-            full_response = f"Error: {e}"
-            message_placeholder.markdown(full_response)
+            answer = "Unable to reach server. Please try again."
+            route = "error"
 
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": full_response
-        }
-    )
+        # 3. Show assistant message
+        if route == "guardrail":
+            assistant_message = f"⚠️ {answer}"
+        else:
+            assistant_message = answer
+        # assistant_message = f"{answer}\n\n🧭 Route: `{route}`"
+
+        st.session_state.messages.append(
+            {"role": "assistant", "content": assistant_message}
+        )
+
+        with st.chat_message("assistant"):
+            st.markdown(assistant_message)
 
 
 # ─────────────────────────────────────────────
@@ -104,7 +101,7 @@ if query:
 with st.sidebar:
     st.header("🧠 Session Controls")
 
-    st.write(f"Current Session: {session_id}")
+    st.write(f"Current Session: `{session_id}`")
 
     if st.button("🧹 Clear Chat UI"):
         st.session_state.messages = []
